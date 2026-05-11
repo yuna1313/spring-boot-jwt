@@ -20,3 +20,8 @@ spring:
       naming:
         physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
     show-sql: true
+
+jwt:
+  secret: cos
+  access-token-expiration-time: 10d
+  refresh-token-expiration-time: 14d

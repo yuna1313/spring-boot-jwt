@@ -1,14 +1,11 @@
 package com.cos.jwt.config.jwt;
 
-import com.auth0.jwt.JWT;
-import com.auth0.jwt.algorithms.Algorithm;
+import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.cos.jwt.config.auth.PrincipalDetails;
 import com.cos.jwt.model.User;
 import com.cos.jwt.repository.UserRepository;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
-import jakarta.servlet.ServletRequest;
-import jakarta.servlet.ServletResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
@@ -27,47 +24,61 @@ import java.io.IOException;
 @Slf4j
 public class JwtAuthorizationFilter extends BasicAuthenticationFilter {
 
-    private UserRepository userRepository;
+    private final UserRepository userRepository;
+    private final JwtTokenProvider jwtTokenProvider;
 
-    public JwtAuthorizationFilter(AuthenticationManager authenticationManager, UserRepository userRepository) {
+    public JwtAuthorizationFilter(AuthenticationManager authenticationManager, UserRepository userRepository, JwtTokenProvider jwtTokenProvider) {
         super(authenticationManager);
         this.userRepository = userRepository;
+        this.jwtTokenProvider = jwtTokenProvider;
     }
-
-    // 인증이나 권한이 필요한 요청이 있을 경우, 해당 필터를 타게 된다.
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws IOException, ServletException {
-        log.info("인증이나 권한이 필요한 주소 요청");
+        log.info("[JwtAuthorizationFilter] authorization request");
 
-        String jwtHeader = request.getHeader("Authorization");
-        log.info("[doFilterInternal] jwtHeader: {}", jwtHeader);
+        String jwtHeader = request.getHeader(JwtTokenProvider.ACCESS_HEADER);
+        log.info("[JwtAuthorizationFilter] jwtHeader: {}", jwtHeader);
 
         // jwt 관련 header가 존재하는지 확인
-        if(jwtHeader == null || !jwtHeader.startsWith("Bearer")) {
+        String jwtToken = JwtTokenProvider.resolveToken(jwtHeader);
+        if (jwtToken == null) {
             chain.doFilter(request, response);
             return;
         }
 
-        // JWT 토큰을 검증해서 정상적인 사용자인지 확인
-        String jwtToken = jwtHeader.replace("Bearer ", "");
+        try {
+            // refresh token이 Authorization 헤더로 들어와 인증에 사용되는 것을 막는다.
+            if (!jwtTokenProvider.isAccessToken(jwtToken)) {
+                chain.doFilter(request, response);
+                return;
+            }
 
-        String username = JWT.require(Algorithm.HMAC512("cos")).build().verify(jwtToken).getClaim("username").asString();
+            // JWT 토큰을 검증해서 정상적인 사용자인지 확인
+            String username = jwtTokenProvider.getUsername(jwtToken);
 
-        // 서명이 정상적으로 되었을 경우
-        if(username != null) {
-            User userEntity = userRepository.findByUsername(username);
+            // 서명이 정상적으로 되었을 경우
+            if (username != null) {
+                User userEntity = userRepository.findByUsername(username);
+                if (userEntity == null) {
+                    response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                    return;
+                }
 
-            PrincipalDetails principalDetails = new PrincipalDetails(userEntity);
+                PrincipalDetails principalDetails = new PrincipalDetails(userEntity);
 
-            // JWT 토큰 서명을 통해서 서명이 정상이면 Authentication 객체를 만들어준다.
-            // 정상적으로 로그인을 한 것이 아니라 인증을 위해 임의로 만들어주는 것이기 때문에, password(credentials)는 null로 넣어줌
-            Authentication authentication = new UsernamePasswordAuthenticationToken(principalDetails, null, principalDetails.getAuthorities());
+                // JWT 토큰 서명을 통해서 서명이 정상이면 Authentication 객체를 만들어준다.
+                // 정상적으로 로그인을 한 것이 아니라 인증을 위해 임의로 만들어주는 것이기 때문에, password(credentials)는 null로 넣어줌
+                Authentication authentication = new UsernamePasswordAuthenticationToken(principalDetails, null, principalDetails.getAuthorities());
 
-            // 강제로 Security의 Session에 접근하여 Authentication 객체를 저장
-            SecurityContextHolder.getContext().setAuthentication(authentication);
-
-            chain.doFilter(request, response);
+                // 강제로 Security의 Session에 접근하여 Authentication 객체를 저장
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            }
+        } catch (JWTVerificationException e) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            return;
         }
+
+        chain.doFilter(request, response);
     }
 }
